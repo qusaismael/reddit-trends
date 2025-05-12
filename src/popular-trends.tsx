@@ -111,10 +111,13 @@ export default function Command() {
   // Function to load posts
   async function fetchPosts(subredditName: string, timeRangeValue: string) {
     if (!subredditName) return;
-
+    
     setIsLoading(true);
     setError(undefined);
-
+    // Clear the search text when loading a new subreddit
+    setSearchText("");
+    setIsTypingSubreddit(false);
+    
     try {
       const url = `https://www.reddit.com/r/${subredditName}/top/.json?t=${timeRangeValue}&limit=25`;
       const response = await fetch(url, {
@@ -207,8 +210,7 @@ export default function Command() {
   function submitCustomSubreddit() {
     if (isTypingSubreddit && searchText.trim()) {
       fetchPosts(searchText.trim(), timeRange);
-      setIsTypingSubreddit(false);
-
+      
       showToast({
         style: Toast.Style.Success,
         title: `Loading r/${searchText.trim()}`,
