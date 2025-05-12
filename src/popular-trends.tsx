@@ -1,6 +1,7 @@
 /** @jsx React.createElement */
+/** @jsxFrag React.Fragment */
 import React, { useState, useEffect } from "react";
-import { ActionPanel, Action, List, showToast, Toast, getPreferenceValues, Icon } from "@raycast/api";
+import { ActionPanel, Action, List, showToast, Toast, Icon, LocalStorage } from "@raycast/api";
 
 interface RedditPost {
   id: string;
@@ -12,71 +13,143 @@ interface RedditPost {
   url: string;
 }
 
-interface Preferences {
-  subreddit: string;
-  timeRange: string;
-}
-
-// Predefined subreddit options
-const SUBREDDIT_OPTIONS = [
-  { title: "LandscapePhotography", value: "LandscapePhotography" },
-  { title: "Popular (All Reddit)", value: "popular" },
-  { title: "Custom", value: "custom" }
-];
-
 // Time range options
 const TIME_RANGE_OPTIONS = [
   { title: "Today", value: "day" },
   { title: "This Week", value: "week" },
   { title: "This Month", value: "month" },
   { title: "This Year", value: "year" },
-  { title: "All Time", value: "all" }
+  { title: "All Time", value: "all" },
 ];
 
 export default function Command() {
-  const preferences = getPreferenceValues<Preferences>();
-  const defaultSubreddit = preferences.subreddit || "LandscapePhotography";
-  const defaultTimeRange = preferences.timeRange || "day";
-  
+  // Default values
+  const defaultSubreddit = "LandscapePhotography";
+  const defaultTimeRange = "day";
+
+  // State
   const [isLoading, setIsLoading] = useState(true);
   const [posts, setPosts] = useState<RedditPost[]>([]);
   const [error, setError] = useState<Error | undefined>();
-  const [timeRange, setTimeRange] = useState(defaultTimeRange);
-  const [customSubreddit, setCustomSubreddit] = useState("");
-  const [selectedSubredditOption, setSelectedSubredditOption] = useState(
-    SUBREDDIT_OPTIONS.some(opt => opt.value === defaultSubreddit) 
-      ? defaultSubreddit 
-      : "custom"
-  );
   const [searchText, setSearchText] = useState("");
-  
-  // Function to load posts from a specific subreddit
-  async function fetchSubredditPosts(subreddit: string, timeFrame: string) {
-    if (!subreddit) return;
-    
+
+  // Current subreddit and time range
+  const [subreddit, setSubreddit] = useState("");
+  const [timeRange, setTimeRange] = useState("");
+  const [isTypingSubreddit, setIsTypingSubreddit] = useState(false);
+  const [history, setHistory] = useState<string[]>([]);
+
+  // Load settings and history on startup
+  useEffect(() => {
+    async function loadSavedSettings() {
+      try {
+        // Load last used subreddit and time range
+        const savedSubreddit = await LocalStorage.getItem<string>("lastSubreddit");
+        const savedTimeRange = await LocalStorage.getItem<string>("lastTimeRange");
+        const savedHistory = await LocalStorage.getItem<string>("subredditHistory");
+
+        // Set initial values
+        const initialSubreddit = savedSubreddit || defaultSubreddit;
+        const initialTimeRange = savedTimeRange || defaultTimeRange;
+
+        setSubreddit(initialSubreddit);
+        setTimeRange(initialTimeRange);
+
+        // Load history
+        if (savedHistory) {
+          setHistory(JSON.parse(savedHistory));
+        }
+
+        // Initial fetch
+        fetchPosts(initialSubreddit, initialTimeRange);
+      } catch (error) {
+        console.error("Failed to load settings:", error);
+        // Fallback to defaults
+        setSubreddit(defaultSubreddit);
+        setTimeRange(defaultTimeRange);
+        fetchPosts(defaultSubreddit, defaultTimeRange);
+      }
+    }
+
+    loadSavedSettings();
+  }, []);
+
+  // Function to add subreddit to history
+  async function addToHistory(subredditName: string) {
+    // Ignore default built-in options
+    if (subredditName === "LandscapePhotography" || subredditName === "popular") {
+      return;
+    }
+
+    try {
+      // Add to front and ensure no duplicates
+      const updatedHistory = [subredditName, ...history.filter((item: string) => item !== subredditName)].slice(0, 5); // Limit to 5 items
+
+      setHistory(updatedHistory);
+      await LocalStorage.setItem("subredditHistory", JSON.stringify(updatedHistory));
+    } catch (error) {
+      console.error("Failed to save history:", error);
+    }
+  }
+
+  // Function to remove from history
+  async function removeFromHistory(subredditName: string) {
+    try {
+      const updatedHistory = history.filter((item: string) => item !== subredditName);
+      setHistory(updatedHistory);
+      await LocalStorage.setItem("subredditHistory", JSON.stringify(updatedHistory));
+
+      showToast({
+        style: Toast.Style.Success,
+        title: `Removed r/${subredditName} from history`,
+      });
+    } catch (error) {
+      console.error("Failed to update history:", error);
+    }
+  }
+
+  // Function to load posts
+  async function fetchPosts(subredditName: string, timeRangeValue: string) {
+    if (!subredditName) return;
+
     setIsLoading(true);
     setError(undefined);
-    
+
     try {
-      const url = `https://www.reddit.com/r/${subreddit}/top/.json?t=${timeFrame}&limit=25`;
-      // Add a user agent to avoid 429 errors
+      const url = `https://www.reddit.com/r/${subredditName}/top/.json?t=${timeRangeValue}&limit=25`;
       const response = await fetch(url, {
         headers: {
-          "User-Agent": "Raycast Reddit Trends Extension"
-        }
+          "User-Agent": "Raycast Reddit Trends Extension",
+        },
       });
-      
+
       if (!response.ok) {
         throw new Error(`Error ${response.status}: ${response.statusText}`);
       }
-      
-      const data = await response.json() as any;
-      
-      if (!data.data?.children?.length) {
-        throw new Error(`No posts found for r/${subreddit}`);
+
+      interface RedditApiResponse {
+        data: {
+          children: Array<{
+            data: {
+              id: string;
+              title: string;
+              score: number;
+              num_comments: number;
+              subreddit: string;
+              permalink: string;
+              url: string;
+            };
+          }>;
+        };
       }
-      
-      const redditPosts = data.data.children.map((child: any) => {
+
+      const data = (await response.json()) as RedditApiResponse;
+
+      if (!data.data?.children?.length) {
+        throw new Error(`No posts found for r/${subredditName}`);
+      }
+
+      const redditPosts = data.data.children.map((child) => {
         const post = child.data;
         return {
           id: post.id,
@@ -88,28 +161,27 @@ export default function Command() {
           url: post.url,
         };
       });
-      
+
       setPosts(redditPosts);
+      setSubreddit(subredditName);
+      setTimeRange(timeRangeValue);
+
+      // Save current settings
+      await LocalStorage.setItem("lastSubreddit", subredditName);
+      await LocalStorage.setItem("lastTimeRange", timeRangeValue);
+
+      // Add to history
+      await addToHistory(subredditName);
     } catch (error) {
       console.error(error);
       setError(error instanceof Error ? error : new Error("Something went wrong"));
-      setPosts([]); // Clear posts on error
+      setPosts([]);
     } finally {
       setIsLoading(false);
     }
   }
 
-  // When subreddit option changes
-  useEffect(() => {
-    if (selectedSubredditOption !== "custom") {
-      fetchSubredditPosts(selectedSubredditOption, timeRange);
-    } else if (customSubreddit) {
-      fetchSubredditPosts(customSubreddit, timeRange);
-    } else {
-      setIsLoading(false);
-    }
-  }, [selectedSubredditOption, customSubreddit, timeRange]);
-
+  // Show error toast
   useEffect(() => {
     if (error) {
       showToast({
@@ -120,93 +192,162 @@ export default function Command() {
     }
   }, [error]);
 
+  // Handle search text changes - either filtering posts or typing a subreddit
   function handleSearchTextChange(text: string) {
-    if (selectedSubredditOption === "custom") {
-      setCustomSubreddit(text);
-    } else {
+    if (isTypingSubreddit) {
+      // Keep the text as-is when typing a subreddit
       setSearchText(text);
+    } else {
+      // When searching in posts, use lowercase for better matching
+      setSearchText(text.toLowerCase());
     }
   }
 
-  // The displayed subreddit name
-  const displayedSubreddit = selectedSubredditOption === "custom" ? customSubreddit : selectedSubredditOption;
-  
-  // Get current time range title
-  const currentTimeRangeTitle = TIME_RANGE_OPTIONS.find(option => option.value === timeRange)?.title || "Today";
-  
-  // Get current subreddit option title
-  const currentSubredditTitle = selectedSubredditOption === "custom" 
-    ? (customSubreddit ? `r/${customSubreddit}` : "Enter a subreddit name")
-    : SUBREDDIT_OPTIONS.find(option => option.value === selectedSubredditOption)?.title || "";
+  // Handle subreddit submission
+  function submitCustomSubreddit() {
+    if (isTypingSubreddit && searchText.trim()) {
+      fetchPosts(searchText.trim(), timeRange);
+      setIsTypingSubreddit(false);
 
-  // Filter posts if there is search text
-  const filteredPosts = searchText && selectedSubredditOption !== "custom"
-    ? posts.filter((post: RedditPost) => post.title.toLowerCase().includes(searchText.toLowerCase()))
-    : posts;
+      showToast({
+        style: Toast.Style.Success,
+        title: `Loading r/${searchText.trim()}`,
+      });
+    }
+  }
+
+  // Toggle between post search and subreddit entry
+  function toggleSubredditTyping() {
+    setIsTypingSubreddit(!isTypingSubreddit);
+    setSearchText("");
+  }
+
+  // Filter posts by search text when not in subreddit typing mode
+  const filteredPosts =
+    !isTypingSubreddit && searchText
+      ? posts.filter((post: RedditPost) => post.title.toLowerCase().includes(searchText))
+      : posts;
+
+  // Get current time range title
+  const timeRangeTitle = TIME_RANGE_OPTIONS.find((opt) => opt.value === timeRange)?.title || "Today";
 
   return (
-    <List 
+    <List
       isLoading={isLoading}
-      searchBarPlaceholder={selectedSubredditOption === "custom" 
-        ? "Enter custom subreddit name..." 
-        : "Search within posts..."
-      }
+      searchBarPlaceholder={isTypingSubreddit ? "Enter subreddit name and press Enter..." : "Search in posts..."}
       onSearchTextChange={handleSearchTextChange}
-      searchText={selectedSubredditOption === "custom" ? customSubreddit : searchText}
-      onSubmit={text => {
-        if (selectedSubredditOption === "custom" && text) {
-          setCustomSubreddit(text);
-        }
-      }}
-      navigationTitle={`Reddit Trends: r/${displayedSubreddit}`}
+      searchText={searchText}
+      navigationTitle={`Reddit Trends - r/${subreddit}`}
+      searchBarAccessory={
+        <List.Dropdown
+          tooltip="Time Range"
+          value={timeRange}
+          onChange={(value: string) => fetchPosts(subreddit, value)}
+        >
+          {TIME_RANGE_OPTIONS.map((option) => (
+            <List.Dropdown.Item key={option.value} title={option.title} value={option.value} />
+          ))}
+        </List.Dropdown>
+      }
     >
-      <List.Section title="Settings">
-        <List.Item
-          title="Subreddit"
-          subtitle={currentSubredditTitle}
-          accessories={[{ text: "Change" }]}
-          actions={
-            <ActionPanel>
-              <ActionPanel.Section title="Select Subreddit">
-                {SUBREDDIT_OPTIONS.map(option => (
+      <List.Section title="Subreddits">
+        {isTypingSubreddit ? (
+          // Custom subreddit input mode
+          <List.Item
+            title={searchText ? `Load r/${searchText}` : "Type a subreddit name"}
+            icon={Icon.PlusCircle}
+            actions={
+              <ActionPanel>
+                <Action
+                  title="Load Subreddit"
+                  icon={Icon.ArrowRight}
+                  shortcut={{ modifiers: ["cmd"], key: "return" }}
+                  onAction={submitCustomSubreddit}
+                />
+                <Action
+                  title="Cancel"
+                  icon={Icon.XmarkCircle}
+                  onAction={() => {
+                    setIsTypingSubreddit(false);
+                    setSearchText("");
+                  }}
+                />
+              </ActionPanel>
+            }
+          />
+        ) : (
+          // Default List Mode
+          <>
+            {/* Custom Subreddit Option */}
+            <List.Item
+              title="Enter Custom Subreddit"
+              icon={Icon.TextCursor}
+              actions={
+                <ActionPanel>
                   <Action
-                    key={option.value}
-                    title={option.title}
-                    onAction={() => {
-                      setSelectedSubredditOption(option.value);
-                      if (option.value !== "custom") {
-                        setSearchText("");
-                      }
-                    }}
+                    title="Enter Subreddit Name"
+                    icon={Icon.TextInput}
+                    shortcut={{ modifiers: ["cmd"], key: "n" }}
+                    onAction={toggleSubredditTyping}
                   />
-                ))}
-              </ActionPanel.Section>
-            </ActionPanel>
-          }
-        />
-        
-        <List.Item
-          title="Time Range"
-          subtitle={currentTimeRangeTitle}
-          accessories={[{ text: "Change" }]}
-          actions={
-            <ActionPanel>
-              <ActionPanel.Section title="Select Time Range">
-                {TIME_RANGE_OPTIONS.map(option => (
+                </ActionPanel>
+              }
+            />
+
+            {/* Default Options */}
+            <List.Item
+              title={
+                subreddit === "LandscapePhotography" ? "r/LandscapePhotography (Current)" : "r/LandscapePhotography"
+              }
+              subtitle="Beautiful landscape photography"
+              icon={subreddit === "LandscapePhotography" ? Icon.Checkmark : Icon.Circle}
+              actions={
+                <ActionPanel>
                   <Action
-                    key={option.value}
-                    title={option.title}
-                    onAction={() => setTimeRange(option.value)}
+                    title="Load R/landscapephotography"
+                    onAction={() => fetchPosts("LandscapePhotography", timeRange)}
                   />
-                ))}
-              </ActionPanel.Section>
-            </ActionPanel>
-          }
-        />
+                </ActionPanel>
+              }
+            />
+
+            <List.Item
+              title={subreddit === "popular" ? "r/popular (Current)" : "r/popular"}
+              subtitle="Reddit's default homepage"
+              icon={subreddit === "popular" ? Icon.Checkmark : Icon.Circle}
+              actions={
+                <ActionPanel>
+                  <Action title="Load R/popular" onAction={() => fetchPosts("popular", timeRange)} />
+                </ActionPanel>
+              }
+            />
+
+            {/* History Items */}
+            {history.map((item: string) => (
+              <List.Item
+                key={item}
+                title={subreddit === item ? `r/${item} (Current)` : `r/${item}`}
+                icon={subreddit === item ? Icon.Checkmark : Icon.Clock}
+                accessories={[
+                  {
+                    icon: Icon.Trash,
+                    tooltip: "Remove from history",
+                  },
+                ]}
+                actions={
+                  <ActionPanel>
+                    <Action title={`Load r/${item}`} onAction={() => fetchPosts(item, timeRange)} />
+                    <Action title="Remove from History" icon={Icon.Trash} onAction={() => removeFromHistory(item)} />
+                  </ActionPanel>
+                }
+              />
+            ))}
+          </>
+        )}
       </List.Section>
 
-      {filteredPosts.length > 0 && (
-        <List.Section title={`Trending on r/${displayedSubreddit}`}>
+      {filteredPosts.length > 0 && !isTypingSubreddit && (
+        <List.Section title={`Trending on r/${subreddit} - ${timeRangeTitle}`}>
           {filteredPosts.map((post: RedditPost) => (
             <List.Item
               key={post.id}
@@ -214,12 +355,12 @@ export default function Command() {
               subtitle={`r/${post.subreddit}`}
               accessories={[
                 { text: `↑ ${formatNumber(post.score)}` },
-                { text: `💬 ${formatNumber(post.num_comments)}` }
+                { text: `💬 ${formatNumber(post.num_comments)}` },
               ]}
               actions={
                 <ActionPanel>
                   <Action.OpenInBrowser url={`https://reddit.com${post.permalink}`} title="Open Post" />
-                  <Action.OpenInBrowser url={post.url} title="Open Content URL" />
+                  {post.url && <Action.OpenInBrowser url={post.url} title="Open Content URL" />}
                   <Action.CopyToClipboard content={`https://reddit.com${post.permalink}`} title="Copy Link" />
                 </ActionPanel>
               }
@@ -228,13 +369,9 @@ export default function Command() {
         </List.Section>
       )}
 
-      {!isLoading && filteredPosts.length === 0 && !(selectedSubredditOption === "custom" && !customSubreddit) && (
+      {!isLoading && filteredPosts.length === 0 && !isTypingSubreddit && (
         <List.EmptyView
-          title={
-            error 
-              ? `Error loading r/${displayedSubreddit}` 
-              : `No posts found for r/${displayedSubreddit}`
-          }
+          title={error ? `Error loading r/${subreddit}` : `No posts found for r/${subreddit}`}
           description={error ? error.message : "Try changing the subreddit or time range"}
         />
       )}
@@ -244,9 +381,9 @@ export default function Command() {
 
 function formatNumber(num: number): string {
   if (num >= 1000000) {
-    return (num / 1000000).toFixed(1) + 'm';
+    return (num / 1000000).toFixed(1) + "m";
   } else if (num >= 1000) {
-    return (num / 1000).toFixed(1) + 'k';
+    return (num / 1000).toFixed(1) + "k";
   }
   return num.toString();
 }
