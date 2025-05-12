@@ -2,6 +2,9 @@
 
 Browse trending posts from Reddit directly from Raycast.
 
+![image](https://github.com/user-attachments/assets/862c26fd-af91-4521-bc7b-d485c7e8f74b)
+![image](https://github.com/user-attachments/assets/6f76a865-7aab-4e01-8ae2-f050767aff46)
+
 ## Features
 
 - View trending posts from any subreddit
